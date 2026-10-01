@@ -1,0 +1,6 @@
+# Copia este archivo a "stores.txt" (en la raíz del repo) y añade una URL
+# por línea, solo tiendas que estés AUTORIZADO a escanear.
+# Las líneas que empiezan por "#" se ignoran.
+
+# https://tu-tienda-autorizada.myshopify.com
+# https://otra-tienda-autorizada.com

@@ -1,0 +1,186 @@
+# Stack completo de ShopiScan:
+#   - postgres (pgvector): almacén de hallazgos + búsqueda vectorial
+#   - ollama: IA 100% local (chat + embeddings)
+#   - ollama-init: descarga los modelos la primera vez
+#   - shopiscan: servidor HTTP (FastAPI) con endpoint /metrics
+#   - pushgateway: recibe métricas de escaneos puntuales hechos con la CLI
+#     (`shopiscan -u ...` fuera de Docker) y las expone a Prometheus
+#   - prometheus: scrapea /metrics del servidor Y el pushgateway
+#   - grafana: dashboards (datasource Prometheus + Postgres ya provisionados)
+#
+# Arranque:  cd deploy && docker compose up -d --build
+#
+# ⚠️  EL FLAG --build ES OBLIGATORIO cada vez que actualices el código de
+# ShopiScan (por ejemplo, tras descargar una versión nueva). Sin --build,
+# "docker compose up -d" REUTILIZA la imagen ya construida anteriormente,
+# aunque el código fuente haya cambiado — es el comportamiento estándar de
+# Docker Compose, no un fallo. Si visitas http://localhost:8000 y ves
+# {"detail":"Not Found"} (un 404 de FastAPI) en vez de la interfaz web,
+# casi siempre significa exactamente esto: estás corriendo una imagen
+# vieja. Solución:
+#   docker compose down
+#   docker compose up -d --build
+# Puedes comprobar qué versión corre realmente en:
+#   curl http://localhost:8000/health
+# (compara el campo "build_time_utc" con la hora a la que descargaste el
+# código; si es mucho más antiguo, te falta reconstruir la imagen).
+#
+# Grafana:   http://localhost:3000  (admin/admin)
+# Prometheus http://localhost:9090
+# API:       http://localhost:8000/health
+#
+# IMPORTANTE — si escaneas con la CLI (`shopiscan -u ...`) en vez de con la
+# API del contenedor, para que los datos lleguen a Grafana necesitas que tu
+# CLI (fuera de Docker) apunte al Pushgateway de este stack. En tu .env:
+#   PROMETHEUS_PUSHGATEWAY_URL=http://localhost:9091
+# Cada escaneo hará un PUT automático de sus métricas ahí; Prometheus las
+# scrapea del Pushgateway cada 15s, y aparecen en el dashboard de Grafana.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: shopiscan_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: shopiscan
+      POSTGRES_USER: shopiscan
+      POSTGRES_PASSWORD: shopiscan
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shopiscan -d shopiscan"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: shopiscan_ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Descarga los modelos la primera vez y termina. Idempotente: si ya
+  # están descargados, 'ollama pull' no vuelve a bajarlos.
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: shopiscan_ollama_init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    # Descarga cada modelo de forma INDEPENDIENTE (';' en vez de '&&'): si
+    # 'llama3.1' (4.9GB) falla o tarda demasiado, 'nomic-embed-text' (274MB,
+    # imprescindible para la búsqueda vectorial en pgvector) se intenta
+    # igual — antes, con '&&', un fallo en el modelo grande bloqueaba el
+    # pequeño sin más aviso, y la búsqueda vectorial fallaba en silencio.
+    # Se pulla primero el pequeño (rápido, y es el que rompe pgvector si
+    # falta) y con 2 reintentos cada uno.
+    entrypoint: >
+      sh -c '
+        pull_with_retry() {
+          for i in 1 2 3; do
+            echo "==> Descargando $$1 (intento $$i/3)...";
+            if ollama pull "$$1"; then return 0; fi;
+            sleep 5;
+          done;
+          echo "!!! No se pudo descargar $$1 tras 3 intentos";
+          return 1;
+        }
+        pull_with_retry nomic-embed-text;
+        pull_with_retry llama3.1;
+        echo "==> Modelos disponibles en el volumen de Ollama:";
+        ollama list
+      '
+    restart: "no"
+
+  shopiscan:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: shopiscan_app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://shopiscan:shopiscan@postgres:5432/shopiscan
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_CHAT_MODEL: llama3.1
+      OLLAMA_EMBED_MODEL: nomic-embed-text
+      EMBED_DIM: "768"
+      SHOPISCAN_HOST: 0.0.0.0
+      SHOPISCAN_PORT: "8000"
+    volumes:
+      # Histórico por tienda (history.py) y base de datos local incremental
+      # (local_vuln_db.py) viven en ~/.shopiscan dentro del contenedor. Sin
+      # este volumen, esos datos se pierden cada vez que se recrea el
+      # contenedor (docker compose down && up) — con él, sobreviven igual
+      # que los datos de postgres/ollama/grafana.
+      - shopiscan_home:/root/.shopiscan
+      # Informes JSON/HTML generados vía la interfaz web ("Guardar informe
+      # en disco") o --json/--html-report equivalentes. A propósito es un
+      # BIND MOUNT (carpeta real en tu disco, ./shopiscan_reports dentro de
+      # deploy/) y NO un volumen nombrado de Docker: un volumen nombrado
+      # solo es accesible con `docker cp`/`docker exec`, no navegando tu
+      # propio sistema de archivos — con un bind mount, los informes
+      # aparecen directamente en deploy/shopiscan_reports/<tienda>/<fecha_hora>/.
+      - ./shopiscan_reports:/app/shopiscan_reports
+
+  pushgateway:
+    image: prom/pushgateway:latest
+    container_name: shopiscan_pushgateway
+    restart: unless-stopped
+    ports:
+      - "9091:9091"
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: shopiscan_prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - shopiscan
+      - pushgateway
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: shopiscan_grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - postgres
+
+volumes:
+  pgdata:
+  ollama_data:
+  grafana_data:
+  shopiscan_home:

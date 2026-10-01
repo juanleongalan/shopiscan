@@ -1,0 +1,93 @@
+name: Escaneo periódico programado
+
+# Ejecuta ShopiScan automáticamente contra la lista de tiendas en
+# `stores.txt` cada semana (y permite lanzarlo manualmente desde la
+# pestaña "Actions" de GitHub). Los informes generados (JSON y HTML) se
+# suben como artefactos descargables de cada ejecución, y el histórico de
+# comparación entre escaneos se persiste entre ejecuciones con
+# actions/cache para que `--no-history` no sea necesario.
+#
+# CONFIGURACIÓN REQUERIDA:
+#   1. Crea el archivo `stores.txt` en la raíz del repo (ver
+#      `stores.example.txt`), con una URL de tienda autorizada por línea.
+#   2. (Opcional) Notificaciones cuando el score empeora entre escaneos:
+#      añade el secret SLACK_WEBHOOK_URL (webhook de Slack) y/o los
+#      secrets SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, NOTIFY_EMAIL_TO
+#      para email. Si no configuras ninguno, simplemente no se notifica.
+#
+# NOTA sobre la IA: el Informe Ejecutivo usa Ollama (IA local), que no
+# está disponible en el runner por defecto de GitHub Actions. Por eso el
+# escaneo programado corre en modo técnico (igualmente completo). Para
+# tener también el informe de IA en CI, usa un self-hosted runner con
+# Ollama y define OLLAMA_URL apuntando a él.
+
+on:
+  schedule:
+    # Todos los lunes a las 06:00 UTC. Ajusta la expresión cron a tu gusto:
+    # https://crontab.guru
+    - cron: "0 6 * * 1"
+  workflow_dispatch: {}  # permite lanzarlo manualmente desde la UI de GitHub
+
+jobs:
+  scheduled-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Instalar ShopiScan
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Restaurar histórico y base de datos local incremental
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.shopiscan/history
+            ~/.shopiscan/local_vuln_db.sqlite3
+          key: shopiscan-state-${{ github.repository }}
+          restore-keys: |
+            shopiscan-state-
+
+      - name: Verificar que existe stores.txt
+        run: |
+          if [ ! -f stores.txt ]; then
+            echo "::error::No se encontró stores.txt en la raíz del repo. Copia stores.example.txt a stores.txt y añade tus tiendas autorizadas."
+            exit 1
+          fi
+
+      - name: Ejecutar escaneo (modo técnico; notifica si el riesgo empeora)
+        env:
+          # Si usas un self-hosted runner con Ollama, define OLLAMA_URL como
+          # secret/variable y añade --ai al comando de abajo.
+          OLLAMA_URL: ${{ secrets.OLLAMA_URL }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          NOTIFY_EMAIL_TO: ${{ secrets.NOTIFY_EMAIL_TO }}
+        run: |
+          mkdir -p reports
+          cd reports
+          if [ -n "$OLLAMA_URL" ]; then
+            AI_FLAG="--ai"
+          else
+            AI_FLAG=""
+          fi
+          shopiscan --url-file ../stores.txt $AI_FLAG --json --html-report -y --no-banner
+
+      - name: Subir informes como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: shopiscan-reports-${{ github.run_number }}
+          path: reports/
+          retention-days: 30

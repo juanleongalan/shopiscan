@@ -1,0 +1,48 @@
+# Entornos virtuales
+venv/
+env/
+.venv/
+
+# Cache y compilados de Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# Variables de entorno / secretos
+.env
+*.key
+
+# Resultados de escaneos (pueden contener info del objetivo)
+# Informes de escaneos (organizados en carpetas por tienda/fecha)
+shopiscan_reports/
+*_report.json
+*_report.html
+reports/
+
+# Lista real de tiendas a escanear en CI (puede contener objetivos privados)
+stores.txt
+
+# IDEs
+.vscode/
+.idea/
+
+# Pruebas
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Métricas Prometheus (textfile collector)
+metrics/
+*.prom
+
+# Volúmenes/datos de Docker (por si se montan localmente)
+deploy/pgdata/
+deploy/ollama_data/
+deploy/grafana_data/

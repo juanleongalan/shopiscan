@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Servidor HTTP de ShopiScan (shopiscan-server), si se usa ese modo.
+  - job_name: "shopiscan"
+    static_configs:
+      - targets: ["shopiscan:8000"]
+
+  # Escaneos puntuales hechos con la CLI (`shopiscan -u ...`) fuera de
+  # Docker: llegan aquí vía PROMETHEUS_PUSHGATEWAY_URL=http://localhost:9091
+  - job_name: "shopiscan-pushgateway"
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]
