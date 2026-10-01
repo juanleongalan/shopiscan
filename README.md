@@ -17,7 +17,7 @@ Incluye además un stack opcional de datos y observabilidad: **PostgreSQL +
 pgvector** para búsqueda semántica de hallazgos similares entre escaneos,
 y **Prometheus + Grafana** para métricas y dashboards.
 
-> Proyecto de Fin de Máster — Ciberseguridad / Desarrollo de Software.
+> Ciberseguridad / Desarrollo de Software.
 > Código abierto bajo licencia MIT.
 
 ---
